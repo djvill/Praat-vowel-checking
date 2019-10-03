@@ -11,6 +11,7 @@
 #### Requires, at minimum, a csv file with at least four columns (in any order):
 #### paths to sound files, vowel start times, vowel end times, and genders; plus
 #### the sound files themselves.
+####
 
 
 ####USER-INPUT SETTINGS####-----------------------------------------------------
@@ -22,23 +23,12 @@ form Mark mismeasurements
 	boolean Reverse_rows 0
 	boolean Save_output_table 1
 	word Output_table_suffix _checked
-	comment After how many consecutive "No" responses should the script remind you that you can save and exit?
-	comment (Enter "0" to disable this feature)
-	integer No_count_reminder 0
-	comment After what percentage of "Yes" responses should the script remind you that you can save and exit?
-	comment (Enter "1" to disable this feature)
-	positive Yes_percentage_reminder 1
 	boolean Play_sound 1
 endform
 
 ##Ensure base_directory$ ends in "/"
 if not endsWith(base_directory$, "/") or not endsWith(base_directory$, "\")
 	base_directory$ = base_directory$ + "/"
-endif
-
-##If nonpositive no_count_reminder, set no_count_reminder arbitrarily high
-if no_count_reminder < 1
-	no_count_reminder = 1000000
 endif
 
 ####ADVANCED SETTINGS####-------------------------------------------------------
@@ -86,7 +76,7 @@ subtable_col$ = ""
 zoom_factor = 2
 ##Number of pauses: How many times should the horizontal cursor pause over each
 ##  formant after playing the sound?
-num_pauses = 3
+num_pauses = 2
 ##Cursor pause time: How long should the horizontal cursor pause over each
 ##  formant after playing the sound?
 cursor_pause_time = 0.2
@@ -95,6 +85,7 @@ convert_mono = 0
 ##Scale intensity (dB): To what intensity should the clip be scaled? To disable,
 ##  set to undefined
 scale_intensity = 70
+# scale_intensity = undefined
 ##No warning (boolean): When reading sound file, don't show "Warning: File too 
 ##  small...Missing samples were set to zero" popup window
 no_warning = 1
@@ -115,7 +106,12 @@ cursor_midpoint = 1
 ##  for both types of response (mismeas, notMismeas). To disable a reminder, set
 ##  it to undefined.
 
-## !!TODO: Fill in
+no_total_rem = undefined
+no_consec_rem = 3
+no_pct_rem = undefined
+yes_total_rem = undefined
+yes_consec_rem = undefined
+yes_pct_rem = undefined
 
 
 ####OTHER MISCELLANEOUS SETTINGS
@@ -138,15 +134,17 @@ default_button = 2
 ## !!TODO: Fill in
 
 ##Check tokens for which mismeas_col$ is blank (boolean)
+check_blank = 1
 
 ##Check tokens for which mismeas_col$ is TRUE (boolean)
+check_TRUE = 0
 
 ##Check tokens for which mismeas_col$ is FALSE (boolean)
+check_FALSE = 0
 
 ####SET UP TABLE####------------------------------------------------------------
 
 ##Load table, bring it into focus, and get dimensions
-# table = Read Table from comma-separated file: csv_file_path$
 table = Read Table from comma-separated file: base_directory$ + csv_file_path$
 View & Edit
 numRow = object[table].nrow
@@ -165,18 +163,20 @@ endif
 
 ##Initialize variables
 row = starting_row
-# clicked = 0
-# prevCounterVal$ = ""
-num_yes = 0
-consec_no = 0
+no_total = 0
+no_consec = 0
+no_pct = 0
+yes_total = 0
+yes_consec = 0
+yes_pct = 0
+exit_early = 0
 
-
-##Add up existing num_yes in case the "Mismeasured" column is not empty
+##Add up existing yes_total in case the "Mismeasured" column is not empty
 selectObject: table
 for yesRow from 1 to numRow
 	mismeasured$ = Get value: yesRow, mismeas_col$
 	if mismeasured$ = "TRUE"
-		num_yes += 1
+		yes_total += 1
 	endif
 endfor
 
@@ -184,18 +184,19 @@ endfor
 
 repeat
 	selectObject: table
-	##Don't redo tokens that have already been evaluated
 	mismeasured$ = Get value: row, mismeas_col$
-	if mismeasured$ = ""
-		##Initialize clicked variable
-		clicked = 0
+	##Check tokens according to settings for which ones to check
+	if (check_blank and mismeasured$ = "") or (check_TRUE and mismeasured$ = "TRUE") or (check_FALSE and mismeasured$ = "FALSE")
+		##Initialize variables
+		click_mismeas = 0
 		
 		##Get info
 		tgName$ = Get value: row, tg_col$
 		soundName$ = Get value: row, sound_col$
 		vowelStart = Get value: row, vowelStart_col$
 		vowelEnd = Get value: row, vowelEnd_col$
-		vowelMid = (vowelEnd - vowelStart)/2 + vowelStart
+		vowelDur = vowelEnd - vowelStart
+		vowelMid = vowelDur/2 + vowelStart
 		lineStart = Get value: row, tgStart_col$
 		gender$ = Get value: row, gender_col$
 		cursorFreq = Get value: row, cursor_col$
@@ -203,23 +204,56 @@ repeat
 		f2 = Get value: row, f2_col$
 		if gender$ = "Female" or gender$ = "F"
 			maxForm = 5500
-		else
+			minPitch = 100
+		elsif gender$ = "Male" or gender$ = "M"
 			maxForm = 5000
+			minPitch = 75
+		else
+			exitScript: "Unknown gender 'gender$' in row 'row'."
 		endif
 		
 		# ##If there's a change in reset_counters_by$ column, reset counters
 		# counterVal$ = Get value: row, reset_counters_by$
 		# if counterVal$ <> prevCounterVal$
-			# num_yes = 0
-			# consec_no = 0
+			# yes_total = 0
+			# no_consec = 0
 		# endif
 		# prevCounterVal$ = counterVal$
 		
 		##Read files
 		tg = Read from file: base_directory$ + tgName$
 		Shift times by: lineStart
-		sound = Read from file: base_directory$ + soundName$
+		if no_warning
+			sound = nowarn Read from file: base_directory$ + soundName$
+		else
+			sound = Read from file: base_directory$ + soundName$
+		endif
 		Shift times by: lineStart
+		soundDur = Get total duration
+		
+		##Get clip timing
+		clipStart = max(vowelMid - vowelDur * zoom_factor, lineStart)
+		clipEnd = min(vowelMid + vowelDur * zoom_factor, lineStart + soundDur)
+		
+		##Optionally convert to mono
+		if convert_mono
+			selectObject: sound
+			soundMono = Convert to mono
+			removeObject: sound
+			sound = soundMono
+		endif
+		
+		##Optionally scale intensity
+		if scale_intensity <> undefined
+			selectObject: sound
+			intens = To Intensity: minPitch, 0, 1
+			intensAll = Get mean: 0, 0, "energy"
+			intensClip = Get mean: clipStart, clipEnd, "energy"
+			removeObject: intens
+			selectObject: sound
+			##Scale intensity of overall sound such that the clip is at scale_intensity
+			Scale intensity: scale_intensity * intensAll / intensClip
+		endif
 		
 		##Open in editor
 		selectObject: tg, sound
@@ -229,86 +263,142 @@ repeat
 			Show analyses: 1, 0, 0, 1, 0, 10.0
 		
 			##Zoom into vowel, with context
-			Zoom: vowelStart, vowelEnd
-			Zoom out
-			Zoom out
+			Zoom: clipStart, clipEnd
 			Formant settings: maxForm, 5, 0.025, 30, 1
-			##Move cursor to midpoint & frequency
-			Move cursor to: vowelMid
-			
+			##Move cursor to midpoint/selection
+			if cursor_midpoint
+				Move cursor to: vowelMid
+			else
+				Select: vowelStart, vowelEnd
+			endif
 			
 			##Optionally play the window
-			if clicked = 0 and play_sound
+			if click_mismeas = 0 and play_sound
 				Play window
 			endif
 			
 			##Toggle the frequency cursor between f1 & f2
-			Move frequency cursor to: f1
-			sleep(cursor_pause_time)
-			Move frequency cursor to: f2
-			sleep(cursor_pause_time)
-			Move frequency cursor to: f1
-			sleep(cursor_pause_time)
-			if cursorFreq <> f2
+			for toggle from 1 to num_pauses
+				Move frequency cursor to: f1
+				sleep(cursor_pause_time)
 				Move frequency cursor to: f2
 				sleep(cursor_pause_time)
+			endfor
+			if cursorFreq <> f2
+				Move frequency cursor to: cursorFreq
+				sleep(cursor_pause_time)
 			endif
-			Move frequency cursor to: cursorFreq
-			sleep(cursor_pause_time)
 			
 			##Ask whether the vowel is mismeasured
 			beginPause: "Is this mismeasured?"
 				comment: "F1: " + fixed$(f1, 0)
 				comment: "F2: " + fixed$(f2, 0)
-			clicked = endPause: mismeasured_button_text$, not_mismeasured_button_text$, exit_button_text$, default_button
+			click_mismeas = endPause: mismeasured_button_text$, not_mismeasured_button_text$, exit_button_text$, default_button
 			Close
 		endeditor
 		
 		removeObject: tg, sound
 		
-		##Write value to table and increment consec_no
-		if clicked = 1 or clicked = 2
-			if clicked = 1
+		##Write value to table and increment counters
+		if click_mismeas = 1 or click_mismeas = 2
+			if click_mismeas = 1
 				misMeas$ = "TRUE"
-				consec_no = 0
-				num_yes += 1
-			elsif clicked = 2
+				no_consec = 0
+				yes_consec += 1
+				yes_total += 1
+				yes_pct = yes_total / numRow
+			elsif click_mismeas = 2
 				misMeas$ = "FALSE"
-				consec_no += 1
+				yes_consec = 0
+				no_consec += 1
+				no_total += 1
+				no_pct = no_total / numRow
 			endif
 			
 			selectObject: table
 			Set string value: row, mismeas_col$, misMeas$
+		endif
+		
+		if click_mismeas = 3
+			exit_early = 1
 		endif
 	endif
 	
 	##Increment row
 	row += 1
 	
-	##If bottom row hasn't been reached, check early-exit conditions
+	##If bottom row hasn't been reached, check early stopping reminders
 	if row <= numRow
-		##If consecutive "No" exceeds no_count_reminder, remind the user that they can exit
-		if consec_no >= no_count_reminder and clicked = 2
-			beginPause: string$(no_count_reminder) + "+ No in a row"
-				comment: "That's " + string$(consec_no) + " ""No""s in a row. Save and exit?"
-			clicked_no = endPause: "Continue", "Save and exit", 2
-			if clicked_no = 2
-				clicked = 3
+		no_more_rems = 0
+		
+		if no_total >= no_total_rem and not no_more_rems
+			beginPause: "At least 'no_total_rem' total ""No""s"
+				comment: "That's 'no_total' total ""No""s. Save and exit?"
+			click_rem = endPause: "Don't exit", "Ignore reminders", "Save and exit", 1
+			if click_rem = 2
+				no_more_rems = 1
+			elsif click_rem = 3
+				exit_early = 1
 			endif
 		endif
-		##If percentage "Yes" exceeds yes_percentage_reminder, remind the user that they can exit
-		if num_yes / numRow >= yes_percentage_reminder
-			beginPause: fixed$(100 * yes_percentage_reminder, 1) + "%+ Yes"
-				comment: "That's " + fixed$(100 * num_yes / numRow, 1) + "% ""Yes""s. Save and exit?"
-			clicked_yes = endPause: "Continue", "Save and exit", 2
-			if clicked_yes = 2
-				clicked = 3
+		
+		if no_consec >= no_consec_rem and not no_more_rems
+			beginPause: "At least 'no_consec_rem' consecutive ""No""s"
+				comment: "That's 'no_consec' ""No""s in a row. Save and exit?"
+			click_rem = endPause: "Don't exit", "Ignore reminders", "Save and exit", 1
+			if click_rem = 2
+				no_more_rems = 1
+			elsif click_rem = 3
+				exit_early = 1
+			endif
+		endif
+		
+		if no_pct >= no_pct_rem and not no_more_rems
+			beginPause: "More than " + fixed$(100 * no_pct, 1) + "% ""No""s"
+				comment: "That's " + fixed$(100 * no_pct, 1) + "% ""No""s. Save and exit?"
+			click_rem = endPause: "Don't exit", "Ignore reminders", "Save and exit", 1
+			if click_rem = 2
+				no_more_rems = 1
+			elsif click_rem = 3
+				exit_early = 1
+			endif
+		endif
+		
+		if yes_total >= yes_total_rem and not no_more_rems
+			beginPause: "At least 'yes_total_rem' total ""Yes""s"
+				comment: "That's 'yes_total' total ""Yes""s. Save and exit?"
+			click_rem = endPause: "Don't exit", "Ignore reminders", "Save and exit", 1
+			if click_rem = 2
+				yes_more_rems = 1
+			elsif click_rem = 3
+				exit_early = 1
+			endif
+		endif
+		
+		if yes_consec >= yes_consec_rem and not no_more_rems
+			beginPause: "At least 'yes_consec_rem' consecutive ""Yes""s"
+				comment: "That's 'yes_consec' ""Yes""s in a row. Save and exit?"
+			click_rem = endPause: "Don't exit", "Ignore reminders", "Save and exit", 1
+			if click_rem = 2
+				yes_more_rems = 1
+			elsif click_rem = 3
+				exit_early = 1
+			endif
+		endif
+
+		if yes_pct >= yes_pct_rem and not no_more_rems
+			beginPause: "More than " + fixed$(100 * yes_pct, 1) + "% ""Yes""s"
+				comment: "That's " + fixed$(100 * yes_pct, 1) + "% ""Yes""s. Save and exit?"
+			click_rem = endPause: "Don't exit", "Ignore reminders", "Save and exit", 1
+			if click_rem = 2
+				no_more_rems = 1
+			elsif click_rem = 3
+				exit_early = 1
 			endif
 		endif
 	endif
 	
-	
-until row > numRow or clicked = 3
+until row > numRow or exit_early
 
 
 ####FINISH UP####---------------------------------------------------------------
@@ -340,7 +430,6 @@ if save_output_table
 endif
 
 ####TODO
-## - Zoom; Loudness scaling
 ## - Implement parameterized stuff listed above
 ## - Move indiv-token stuff into a procedure
 ## - Create mismeas_col$ if it doesn't exist
